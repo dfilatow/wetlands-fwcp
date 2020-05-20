@@ -1,10 +1,10 @@
-##WWA.R Wetland Watershed Analysis
+##bcdc Wetland Analysis script
 ##author : Deepa Filatow
 ##initiated: March 12, 2020
-##last edited: May 4, 2020
+##last edited: May 20, 2020
 
 ##option to clear memeory
-#rm(list = ls())
+#rm(list = ls()) ## uncomment this line if you want to start fresh. WARNING..this will clear all libraries data, variables etc.
 
 ############################################################################
 ##Load libraries############################################################
@@ -171,7 +171,8 @@ hv.clump.elev <- zonal(z = hv.clumps, x = dem.ws, fun = 'sum', na.rm = TRUE)
 
 
 
-
+###############################END OF TESTED PART OF SCRIPT###########################################################
+######################################################################################################################
 
 
 zonal(stack(r, r*10), z, 'sum')
