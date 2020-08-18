@@ -29,8 +29,10 @@ library(smoothr)
 ############################################################################
 
 bcalb <- 3005
-wwt.file <- system.file("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img") #water(3), wetland(2), terrestrial prediction surface(1)
+wwt.file <- "Data/Categ/3CategoryPrediction/3CategoryPrediction/20190926-103025_map_recl.tif" #water(3), wetland(2), terrestrial prediction surface(1)
 ws.code <- "PARS"## test watershed with plenty of data
+
+
 #dem.file <- "BC_DEM25m/bc_elevation_25m_bcalb.tif"
 dem <- raster("C:/Users/dfilatow/Documents/GISdownloads/HABC/elev.tif")#loadem
 
@@ -40,8 +42,9 @@ mapsheet <- "093J070"##this is a mapsheet in our test watershed
 ms <- bcdc_query_geodata("a61976ac-d8e8-4862-851e-d105227b6525", crs = bcalb) %>%
   filter( MAP_TILE == mapsheet) %>%
   collect()
+
 ## this is the output from the 2020 FWCP-Peace wetland model
-wwt <- raster("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img")
+wwt <- raster(wwt.file)
 
 BUFF <-  100
 
