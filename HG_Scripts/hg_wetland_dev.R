@@ -47,7 +47,26 @@ get_basin_stats<-function(dem_pth,x,y,agg_grids,stat)
   }
 }
 
+saga_create_basin<-function(dem_pth,x,y,UID,out_dir,envr)
+{
+  #Get up-slope catchment area for the point defined by 'x,y', derived from filled DEM using MFD algorithm in SAGA 
+  RSAGA::rsaga.geoprocessor('ta_hydrology',4,param = list(TARGET_PT_X=x,TARGET_PT_Y=y,ELEVATION=dem_pth,AREA=paste(tempdir(),'/',UID,'_basin.sgrd',sep=""),METHOD=2),env=envr)
+  
+  #Using output from up-slope catchment area, convert to binary grid where MFD contributing is > 50%
+  RSAGA::rsaga.grid.calculus(in.grids = paste(tempdir(),'/',UID,'_basin.sgrd',sep=""), out.grid = paste(tempdir(),'/',UID,'_basin_bnry.sgrd',sep=""), formula = 'gt(a,50)',env = envr)
+  
+  #Convert up-slope binary raster to vector. 
+  RSAGA::rsaga.geoprocessor('shapes_grid',6,param = list(GRID=paste(tempdir(),'/',UID,'_basin_bnry.sgrd',sep=""),POLYGONS=paste(out_dir,'/',UID,'_basin.shp',sep=""),CLASS_ALL=0,SPLIT=0),env = envr)
+  
+}
+
+
+
 #An example, for basin defined by point (EPSG:3005; x:1299974,y:954998)
 start<-Sys.time()
 hm<-get_basin_stats('/home/hunter/Downloads/dem_fill.sgrd',1299974,954998,'/home/hunter/Downloads/dem.sgrd',"tabl")
 end<-Sys.time()
+
+
+hmm<-saga_create_basin('/home/hunter/Downloads/dem_fill.sgrd',1299974,954998,103,'/home/hunter/Downloads')
+

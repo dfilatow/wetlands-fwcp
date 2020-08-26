@@ -28,21 +28,27 @@ library(smoothr)
 ### ADD TEST VARIABLES #####################################################
 ############################################################################
 
+#BC Alb. EPSG Code
 bcalb <- 3005
-wwt.file <- system.file("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img") #water(3), wetland(2), terrestrial prediction surface(1)
-ws.code <- "PARS"## test watershed with plenty of data
-#dem.file <- "BC_DEM25m/bc_elevation_25m_bcalb.tif"
-dem <- raster("C:/Users/dfilatow/Documents/GISdownloads/HABC/elev.tif")#loadem
 
-mapsheet <- "093J070"##this is a mapsheet in our test watershed
+#Path to 3 class wetland classification output
+wwt.file <- "Data/Categ/3CategoryPrediction/3CategoryPrediction/20190926-103025_map_recl.tif" #water(3), wetland(2), terrestrial prediction surface(1)
 
-##get the mapsheet from bcdc
+# A test watershed (ws) code...(PARS ws has plenty of data)
+ws.code <- "PARS"
+
+#This is the mapsheet code within the PARS test watershed
+mapsheet <- "093J070"
+
+#Get the mapsheet from bcdc using above code
 ms <- bcdc_query_geodata("a61976ac-d8e8-4862-851e-d105227b6525", crs = bcalb) %>%
   filter( MAP_TILE == mapsheet) %>%
   collect()
-## this is the output from the 2020 FWCP-Peace wetland model
-wwt <- raster("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img")
 
+#Load the output from the 2020 FWCP-Peace wetland model as a raster
+wwt <- raster(wwt.file)
+
+#Define a buffer distance 
 BUFF <-  100
 
 ############################################################################
@@ -50,12 +56,15 @@ BUFF <-  100
 ############################################################################
 
 
-##Create sf polygon: watershed group, ws from bcdc watershed code = ws.code
-##https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-watershed-groups
+#Create sf polygon: watershed group, ws from bcdc watershed code = ws.code
+#https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-watershed-groups
 bcdc_describe_feature("51f20b1a-ab75-42de-809d-bf415a0f9c62")
+
 ws <- bcdc_query_geodata("51f20b1a-ab75-42de-809d-bf415a0f9c62", crs = bcalb) %>%
-  filter( WATERSHED_GROUP_CODE == ws.code) %>%
+  filter(WATERSHED_GROUP_CODE == ws.code) %>%
   collect() %>% st_as_sf()
+
+
 ##TO DO:Test if conversion to sf is necessary for rasterization below now that raster:: is used
 
 ws.area_m2 <- sum(ws$AREA_HA)*10000 # watershed area for in hectrars later calculations. have to use sum in case of mulipolygons on the coast
@@ -65,14 +74,14 @@ ws.area_m2 <- sum(ws$AREA_HA)*10000 # watershed area for in hectrars later calcu
 ##Create sf polygon: 20K mapsheet grids that intersect with the target watershed group
 ##https://catalogue.data.gov.bc.ca/dataset/bcgs-1-20-000-grid
 ms.ws <- bcdc_query_geodata("a61976ac-d8e8-4862-851e-d105227b6525", crs = bcalb) %>%
-  filter( INTERSECTS(ws)) %>%
+  filter(INTERSECTS(ws)) %>%
   collect()
 
 #plot(st_geometry(ms.ws))
 
 
 #crop dem.habc to the watershed ws
-dem.ws <- dem %>% raster::crop(ws) %>% raster::mask(ws)
+dem.ws <- GrabCDED::cded_get(ws)#loadem
 #NOTE:crop then mask is more efficient and applies the correct extent
 #then directly masking from all of bc
 
@@ -91,7 +100,7 @@ wwt.count.df <- wwt.ws %>% freq() %>% as.data.frame() %>% na.omit()#data frame o
 wwt.ws.dem <- wwt.ws %>% projectRaster(dem.ws, bilinear) #Reproject the raster to the proveded DEM
 
 ww.ws <- wwt.ws.dem
-values (ww.ws)[values(ww.ws)<2] = NA
+values(ww.ws)[values(ww.ws)<2] = NA
 
 
 ##Create sf lines: stream network, sn for watershed code ws.code
@@ -116,7 +125,7 @@ sn.length_m <- sum(sn$FEATURE_LENGTH_M)##length of streams in m in the watershed
 ##https://catalogue.data.gov.bc.ca/dataset/harvested-areas-of-bc-consolidated-cutblocks-
 bcdc_describe_feature("b1b647a6-f271-42e0-9cd0-89ec24bce9f7")
 cb <- bcdc_query_geodata("b1b647a6-f271-42e0-9cd0-89ec24bce9f7", crs = bcalb) %>%
-   filter(INTERSECTS(ws)) %>%
+  filter(INTERSECTS(ws)) %>%
   collect() %>% st_as_sf()## Test if conversion to sf is necessary for rasterization below now that raster:: is used
 
 #plot(st_geometry(cb))
@@ -139,8 +148,8 @@ rd.length_m <- sum(rd$FEATURE_LENGTH_M)
 
 #fasterize disturbance layers
 cb.r <- fasterize(cb, dem.ws, background = 0)
-rd.r <- rd %>% st_buffer(dist=(sum(res(dem)/2))) %>% fasterize(dem.ws, background = 0)
-sn.r <- sn %>% st_buffer(dist=(sum(res(dem)/2))) %>% fasterize(dem.ws, background = 0)
+rd.r <- rd %>% st_buffer(dist=(sum(res(dem.ws)/2))) %>% fasterize(dem.ws, background = 0)
+sn.r <- sn %>% st_buffer(dist=(sum(res(dem.ws)/2))) %>% fasterize(dem.ws, background = 0)
 
 #create a raster of connected wetland and stream rasters =1 rest null
 ww.sn.r <- sn.r + wwt.ws.dem
@@ -160,15 +169,15 @@ hv.clumps <- raster::clump(hv, directions=8)
 
 ##Add connected wetlands and streams v1.clumps to the hydrology raster stack
 hydrology.stack <- addLayer(hydrology.stack, hv.clumps)
-plot(v1)
+
 
 ##try some stuff with v1.clumps
 
-hist(log(freq (hv.clumps))) # where i have used dem = habc elev this is the hystogram of area (ha) of connected wetland clumps
+hist(log(freq(hv.clumps))) # where i have used dem = habc elev this is the hystogram of area (ha) of connected wetland clumps
 
 hv.clump.elev <- zonal(z = hv.clumps, x = dem.ws, fun = 'sum', na.rm = TRUE)  
 
-
+hv.clump.elev
 
 
 
