@@ -1,7 +1,6 @@
 ##WWA.R Wetland Watershed Analysis
 ##author : Deepa Filatow
 ##initiated: March 12, 2020
-##last edited: May 4, 2020
 
 ##option to clear memeory
 #rm(list = ls())
