@@ -59,25 +59,25 @@ if(crs(wwt)@projargs!=bcalb_prj4)
   wwt<-raster::projectRaster(wwt,crs=bcalb_prj4)
 }
 
+#Resample DEM to wetland classification resolution
+dem_ws<-raster::resample(dem_ws,wwt)
+
 #Crop and mask wetland classification to watershed
 wwt_ws<-wwt %>%
   raster::crop(ws) %>%
   raster::mask(ws)
 
-#Remove upland pixels
-wwt_ws[wwt_ws==1]<-NA
-
-
-
 
 ####Convert wwt_ws to a data frame with x-y coords####
-wwt_df <- raster::as.data.frame(wwt_ws,xy=T,na.rm=T) %>% 
-  dplyr::rename(OID=X20190926.103025_map_recl_OID,Value=X20190926.103025_map_recl_Value,Count=X20190926.103025_map_recl_Count) %>% 
+
+xyz <- as.data.frame(rasterToPoints(wwt_ws))
+
+colnames(xyz)<-c("x","y","Value")
+
+wwt_df<-xyz %>%
   dplyr::mutate(UID=row_number()) %>%
-  dplyr::mutate(out_name = paste('basin_',UID,sep=""))
-
-
-wwt_df<-wwt_df[complete.cases(wwt_df),]
+  dplyr::mutate(out_name = paste('basin_',UID,sep="")) %>%
+  dplyr::filter(Value==2 | Value==3)
 
 ####Get disturbance / land use layers####
 
@@ -85,14 +85,13 @@ wwt_df<-wwt_df[complete.cases(wwt_df),]
 #https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network
 #warning: this takes 1-2 minutes depending on your choice of watershed
 bcdc_describe_feature("92344413-8035-4c08-b996-65a9b3f62fca")
-sn <- bcdc_query_geodata("92344413-8035-4c08-b996-65a9b3f62fca", crs = bcalb) %>%
-  filter( WATERSHED_GROUP_CODE == ws.code) %>%
+sn <- bcdc_query_geodata("92344413-8035-4c08-b996-65a9b3f62fca") %>%
+  filter( WATERSHED_GROUP_CODE == ws_code) %>%
   collect() %>% st_as_sf()
 
 
 
-
-
+####Set of GRASS Environment####
 initGRASS(gisBase = "/usr/lib/grass78",
           home=tempdir(),
           gisDbase =grass_Db,
@@ -105,11 +104,43 @@ use_sp()
 dem_ws_pth<-paste(tempdir(),'/dem_ws.tif',sep="")
 writeRaster(dem_ws,dem_ws_pth)
 
+#Set g.region to that of dem_ws using a convenient openSTARS function 
 openSTARS::setup_grass_environment(dem_ws_pth)
 
-writeRAST(as(dem_ws,"SpatialGridDataFrame"),'dem',ignore.stderr = T)
+#Write DEM and wetland classification to wetland environment
+writeRAST(as(dem_ws,"SpatialGridDataFrame"),'dem',ignore.stderr = T,overwrite = T)
+writeRAST(as(wwt_ws,"SpatialGridDataFrame"),'wwt',ignore.stderr = T, overwrite = T)
 
+#Run r.watershed in GRASS to create DEM derivitives and stream network 
 execGRASS("r.watershed",parameters = list(elevation='dem',threshold=10,accumulation='acc',tci='topo_idx',spi='strm_pow',drainage='dir',stream='stream_r',length_slope='slop_lngth',slope_steepness='steep'),flags = c('overwrite','quiet'))
+
+#Set GRASS mask to classification raster 
+execGRASS("r.mask",parameters = list(raster='wwt'))
+
+
+execGRASS("r.mapcalc",flags = c("overwrite"),
+          parameters = list(
+            expression="wwt_acc = acc"
+          ))
+
+execGRASS("r.mask", flags = c("r"))
+
+
+wwt_acc<-readRAST('wwt_acc',ignore.stderr = T)
+
+wwt_acc<-raster(wwt_acc) %>%
+  raster::crop(ws) %>%
+  raster::mask(ws)
+
+wwt_acc<-as.data.frame(wwt_acc,xy=T,na.rm=T)
+
+wwt_acc<-wwt_acc[complete.cases(wwt_acc),]
+
+wwt_acc<-wwt_acc[sample(c(1:nrow(wwt_acc)),nrow(wwt_acc)),]
+
+wwt_acc<-wwt_acc %>%
+  dplyr::mutate(UID=row_number()) %>%
+  dplyr::mutate(out_name = paste('basin_',UID,sep=""))
 
 delin_basin<-function(basin_df,procs)
 {
@@ -139,6 +170,8 @@ delin_basin<-function(basin_df,procs)
   
   cmd_tbl<-cmd_tbl$cmd
   
+  cmd_tbl<-c(cmd_tbl,"exit 0")
+  
   script_pth=paste(tempdir(),'/grass_delin_basin.sh',sep="")
   
   write(cmd_tbl,ncolumns = 1,script_pth)
@@ -151,9 +184,9 @@ delin_basin<-function(basin_df,procs)
   system(cmd_str)
 }
 
-wwt_df_samp<-wwt_df[sample(c(1:nrow(wwt_df)),100),]
+#wwt_df_samp<-wwt_df[sample(c(1:nrow(wwt_df)),100),]
 
-delin_basin(wwt_df_samp,26)
+#delin_basin(wwt_df_samp,26)
 
 calc_basin_stats<-function(basin_df,stat_rast,procs,out_dir)
 {
@@ -183,6 +216,8 @@ calc_basin_stats<-function(basin_df,stat_rast,procs,out_dir)
   
   cmd_tbl<-cmd_tbl$cmd
   
+  cmd_tbl<-c(cmd_tbl,"exit 0")
+  
   script_pth=paste(tempdir(),'/grass_basin_stats.sh',sep="")
   
   write(cmd_tbl,ncolumns = 1,script_pth)
@@ -195,7 +230,7 @@ calc_basin_stats<-function(basin_df,stat_rast,procs,out_dir)
   system(cmd_str)
 }
 
-calc_basin_stats(wwt_df_samp,'slop_lngth',26,"/home/hunter/Downloads/Poo")
+#calc_basin_stats(wwt_df_samp,'slop_lngth',26,"/home/hunter/Downloads/Poo")
 
 stats_to_df<-function(basin_df,stat_dir,stat)
 {
@@ -252,4 +287,43 @@ stats_to_df<-function(basin_df,stat_dir,stat)
 }
 
 
-
+get_basin_stats<-function(basin_df,procs,stat_rast,stat,chunk)
+{
+  N<-nrow(basin_df)
+  
+  start_idx<-1
+  end_idx<-1
+  
+  stat_vec<-c()
+  
+  while(end_idx<=N)
+  {
+    if((start_idx+chunk)>N)
+    {
+      end_idx<-N
+    }else{
+      end_idx<-start_idx+chunk
+    }
+    
+    basin_df_sub<-basin_df[c(start_idx:end_idx),]
+    
+    delin_basin(basin_df_sub,procs)
+    
+    stat_dir<-paste(tempdir(),"/temp_basin_stats/",sep="")
+    system(paste("mkdir ",stat_dir,sep=""))
+    
+    calc_basin_stats(basin_df_sub,stat_rast,procs,stat_dir)
+    
+    tmp<-stats_to_df(basin_df_sub,stat_dir,stat)
+    
+    stat_vec<-rbind(stat_vec,tmp)
+    
+    execGRASS('g.remove',parameters = list(type='raster',pattern="basin*"),flags=c('f'))
+    
+    system(paste("rm -r ",stat_dir,sep=""))
+    
+    start_idx<-end_idx+1
+    
+  }
+  
+}
