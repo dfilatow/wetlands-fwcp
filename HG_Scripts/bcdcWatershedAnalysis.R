@@ -3,10 +3,11 @@ library(sf)
 library(sp)
 library(raster)
 library(tidyverse)
-library(GrabCDED)
 library(rgdal)
 library(rgrass7)
-library(openSTARS)
+library(GRASSBasinStats)
+library(GetBCDataBatch)
+library(GrabCDED)
 
 ####Define Global Vars####
 bcalb_epsg <- 3005
@@ -81,249 +82,74 @@ wwt_df<-xyz %>%
 
 ####Get disturbance / land use layers####
 
-#Create sf lines: stream network, sn for watershed code ws.code
-#https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network
-#warning: this takes 1-2 minutes depending on your choice of watershed
+#Streams
 bcdc_describe_feature("92344413-8035-4c08-b996-65a9b3f62fca")
-sn <- bcdc_query_geodata("92344413-8035-4c08-b996-65a9b3f62fca") %>%
-  filter( WATERSHED_GROUP_CODE == ws_code) %>%
-  collect() %>% st_as_sf()
 
+#Describe current layers of interest
+#Cutblocks
+bcdc_describe_feature("b1b647a6-f271-42e0-9cd0-89ec24bce9f7")
+#Roads
+bcdc_describe_feature("bb060417-b6e6-4548-b837-f9060d94743e")
+#Fires
+bcdc_describe_feature("22c7cb44-1463-48f7-8e47-88857f207702")
 
+#Define layer parameter vectors for input to GetBCDataBatch 
+sn<-c("92344413-8035-4c08-b996-65a9b3f62fca",NA,"WATERSHED_GROUP_CODE == 'PARS'")
+cb.young<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR > 2010")
+cb.adult<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR <= 2010 && HARVEST_YEAR > 2000")
+cb.mature<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR <= 2000")
+rd<-c("bb060417-b6e6-4548-b837-f9060d94743e","ws",NA)
+fr.young<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR > 2010")
+fr.adult<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR <= 2010 && FIRE_YEAR > 2000")
+fr.mature<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR <= 2000")
+
+#Create layer data frame and rename columns 
+lyr_tabl<-as.data.frame(rbind(sn,cb.young,cb.adult,cb.mature,rd,fr.young,fr.adult,fr.mature))
+colnames(lyr_tabl)<-c('code','geom_ext','filter_exp')
+
+#DL layers using GetBCDataBatch
+dist_lst<-GetBCDataBatch::get_bcdata_batch(lyr_tabl)
+
+####Rasterize disturbance layers for calculating basing statistics####
+sn<-fasterize::fasterize(dist_lst[[1]] %>% sf::st_buffer(dist=(sum(res(dem_ws)/2))), dem_ws, background = 0) %>% raster::crop(ws)
+cb.young<-fasterize::fasterize(dist_lst[[2]],dem_ws, background = 0) %>% raster::crop(ws)
+cb.adult<-fasterize::fasterize(dist_lst[[3]],dem_ws, background = 0) %>% raster::crop(ws)
+cb.mature<-fasterize::fasterize(dist_lst[[4]],dem_ws, background = 0) %>% raster::crop(ws)
+rd<-fasterize::fasterize(dist_lst[[5]] %>% sf::st_buffer(dist=(sum(res(dem_ws)/2))), dem_ws, background = 0) %>% raster::crop(ws)
+fr.young<-fasterize::fasterize(dist_lst[[6]],dem_ws, background = 0) %>% raster::crop(ws)
+fr.adult<-fasterize::fasterize(dist_lst[[7]],dem_ws, background = 0) %>% raster::crop(ws)
+fr.mature<-fasterize::fasterize(dist_lst[[8]],dem_ws, background = 0) %>% raster::crop(ws)
 
 ####Set of GRASS Environment####
 initGRASS(gisBase = "/usr/lib/grass78",
           home=tempdir(),
           gisDbase =grass_Db,
           location = grass_loc,
+          mapset = 'PERMANENT',
           override = T,
           remove_GISRC=T)
 
+#Set g.region to 'dem_ws' parameters 
 use_sp()
-
-dem_ws_pth<-paste(tempdir(),'/dem_ws.tif',sep="")
-writeRaster(dem_ws,dem_ws_pth)
-
-#Set g.region to that of dem_ws using a convenient openSTARS function 
-openSTARS::setup_grass_environment(dem_ws_pth)
-
-#Write DEM and wetland classification to wetland environment
 writeRAST(as(dem_ws,"SpatialGridDataFrame"),'dem',ignore.stderr = T,overwrite = T)
+execGRASS('g.region',parameters = list(raster='dem'))
+
+
+#Write DEM, wetland classification and FWA stream raster to GRASS environment
 writeRAST(as(wwt_ws,"SpatialGridDataFrame"),'wwt',ignore.stderr = T, overwrite = T)
+writeRAST(as(sn,"SpatialGridDataFrame"),'fwa_stream_rast',ignore.stderr = T, overwrite = T)
+
+#Write binary disturbance raters to GRASS environment 
+writeRAST(as(rd,"SpatialGridDataFrame"),'roads',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.young,"SpatialGridDataFrame"),'cb_young',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.adult,"SpatialGridDataFrame"),'cb_adult',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.mature,"SpatialGridDataFrame"),'cb_mature',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.young,"SpatialGridDataFrame"),'fr_young',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.adult,"SpatialGridDataFrame"),'fr_adult',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.mature,"SpatialGridDataFrame"),'fr_mature',ignore.stderr = T,overwrite = T)
 
 #Run r.watershed in GRASS to create DEM derivitives and stream network 
 execGRASS("r.watershed",parameters = list(elevation='dem',threshold=10,accumulation='acc',tci='topo_idx',spi='strm_pow',drainage='dir',stream='stream_r',length_slope='slop_lngth',slope_steepness='steep'),flags = c('overwrite','quiet'))
 
-#Set GRASS mask to classification raster 
-execGRASS("r.mask",parameters = list(raster='wwt'))
 
-
-execGRASS("r.mapcalc",flags = c("overwrite"),
-          parameters = list(
-            expression="wwt_acc = acc"
-          ))
-
-execGRASS("r.mask", flags = c("r"))
-
-
-wwt_acc<-readRAST('wwt_acc',ignore.stderr = T)
-
-wwt_acc<-raster(wwt_acc) %>%
-  raster::crop(ws) %>%
-  raster::mask(ws)
-
-wwt_acc<-as.data.frame(wwt_acc,xy=T,na.rm=T)
-
-wwt_acc<-wwt_acc[complete.cases(wwt_acc),]
-
-wwt_acc<-wwt_acc[sample(c(1:nrow(wwt_acc)),nrow(wwt_acc)),]
-
-wwt_acc<-wwt_acc %>%
-  dplyr::mutate(UID=row_number()) %>%
-  dplyr::mutate(out_name = paste('basin_',UID,sep=""))
-
-delin_basin<-function(basin_df,procs)
-{
-  cmd_tbl<-c()
-  
-  cmd_tbl[1]<-"#!/bin/bash"
-  
-  cmds<-as.data.frame(paste('r.stream.basins direction=dir@PERMANENT coordinates=',basin_df$x,",",basin_df$y,' basins=basin_',basin_df$UID,' --overwrite --quiet &',sep=""))
-  
-  cmd_tbl<-as.data.frame(rbind(cmd_tbl,cmds))
-  
-  cmd_tbl$row_idx<-c(1:nrow(cmd_tbl))
-  
-  colnames(cmd_tbl)<-c('cmd','ridx')
-  
-  wait_v<-(c(1:floor(nrow(basin_df)/procs))*procs)+0.5
-  
-  wait_v<-as.data.frame(cbind(rep("wait",length(wait_v)),wait_v))
-  
-  colnames(wait_v)<-c('cmd','ridx')
-  
-  cmd_tbl<-rbind(cmd_tbl,wait_v)
-  
-  cmd_tbl$ridx<-as.numeric(cmd_tbl$ridx)
-  
-  cmd_tbl<-as.data.frame(cmd_tbl)[order(cmd_tbl$ridx),]
-  
-  cmd_tbl<-cmd_tbl$cmd
-  
-  cmd_tbl<-c(cmd_tbl,"exit 0")
-  
-  script_pth=paste(tempdir(),'/grass_delin_basin.sh',sep="")
-  
-  write(cmd_tbl,ncolumns = 1,script_pth)
-  
-  system(paste('chmod u+x ',script_pth,sep=""))
-  
-  cmd_str<-paste('sh ',script_pth,sep="")
-  
-  print("Delineating basins, this may take a while ...")
-  system(cmd_str)
-}
-
-#wwt_df_samp<-wwt_df[sample(c(1:nrow(wwt_df)),100),]
-
-#delin_basin(wwt_df_samp,26)
-
-calc_basin_stats<-function(basin_df,stat_rast,procs,out_dir)
-{
-  cmd_tbl<-c()
-  
-  cmd_tbl[1]<-"#!/bin/bash"
-  
-  cmds<-as.data.frame(paste('r.univar -g --overwrite map=',stat_rast,' zones=basin_',basin_df$UID,' output=',out_dir,'/basin_stats_',basin_df$UID,'.txt separator=newline &',sep=""))
-  
-  cmd_tbl<-as.data.frame(rbind(cmd_tbl,cmds))
-  
-  cmd_tbl$row_idx<-c(1:nrow(cmd_tbl))
-  
-  colnames(cmd_tbl)<-c('cmd','ridx')
-  
-  wait_v<-(c(1:floor(nrow(basin_df)/procs))*procs)+0.5
-  
-  wait_v<-as.data.frame(cbind(rep("wait",length(wait_v)),wait_v))
-  
-  colnames(wait_v)<-c('cmd','ridx')
-  
-  cmd_tbl<-rbind(cmd_tbl,wait_v)
-  
-  cmd_tbl$ridx<-as.numeric(cmd_tbl$ridx)
-  
-  cmd_tbl<-as.data.frame(cmd_tbl)[order(cmd_tbl$ridx),]
-  
-  cmd_tbl<-cmd_tbl$cmd
-  
-  cmd_tbl<-c(cmd_tbl,"exit 0")
-  
-  script_pth=paste(tempdir(),'/grass_basin_stats.sh',sep="")
-  
-  write(cmd_tbl,ncolumns = 1,script_pth)
-  
-  system(paste('chmod u+x ',script_pth,sep=""))
-  
-  cmd_str<-paste('sh ',script_pth,sep="")
-  
-  print("Calculating basin stats, this may take a while ...")
-  system(cmd_str)
-}
-
-#calc_basin_stats(wwt_df_samp,'slop_lngth',26,"/home/hunter/Downloads/Poo")
-
-stats_to_df<-function(basin_df,stat_dir,stat)
-{
-  basin_vec<-c()
-  stat_vec<-c()
-  
-  for(r in c(1:nrow(basin_df)))
-  {
-    stats<-readr::read_lines(paste(stat_dir,'/basin_stats_',basin_df$UID[r],'.txt',sep=""))
-    
-    basin_vec[r]<-basin_df$UID[r]
-    
-    if(stat=="n")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[2],"=")[[1]][2])
-    }
-    if(stat=="min")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[5],"=")[[1]][2])
-    }
-    if(stat=="max")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[6],"=")[[1]][2])
-    }
-    if(stat=="mean")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[8],"=")[[1]][2])
-    }
-    if(stat=="MAE")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[9],"=")[[1]][2])
-    }
-    if(stat=="stddev")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[10],"=")[[1]][2])
-    }
-    if(stat=="var")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[11],"=")[[1]][2])
-    }
-    if(stat=="sum")
-    {
-      stat_vec[r]<-as.numeric(strsplit(stats[13],"=")[[1]][2])
-    }
-    
-  }
-  
-  rslt<-as.data.frame(cbind(basin_vec,stat_vec))
-  
-  colnames(rslt)<-c("UID",stat)
-  
-  return(rslt)
-  
-}
-
-
-get_basin_stats<-function(basin_df,procs,stat_rast,stat,chunk)
-{
-  N<-nrow(basin_df)
-  
-  start_idx<-1
-  end_idx<-1
-  
-  stat_vec<-c()
-  
-  while(end_idx<=N)
-  {
-    if((start_idx+chunk)>N)
-    {
-      end_idx<-N
-    }else{
-      end_idx<-start_idx+chunk
-    }
-    
-    basin_df_sub<-basin_df[c(start_idx:end_idx),]
-    
-    delin_basin(basin_df_sub,procs)
-    
-    stat_dir<-paste(tempdir(),"/temp_basin_stats/",sep="")
-    system(paste("mkdir ",stat_dir,sep=""))
-    
-    calc_basin_stats(basin_df_sub,stat_rast,procs,stat_dir)
-    
-    tmp<-stats_to_df(basin_df_sub,stat_dir,stat)
-    
-    stat_vec<-rbind(stat_vec,tmp)
-    
-    execGRASS('g.remove',parameters = list(type='raster',pattern="basin*"),flags=c('f'))
-    
-    system(paste("rm -r ",stat_dir,sep=""))
-    
-    start_idx<-end_idx+1
-    
-  }
-  
-}
+test<-GRASSBasinStats::get_basin_stats(basin_df=wwt_df_samp,procs=26,stat_rast='cb_adult')

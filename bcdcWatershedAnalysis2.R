@@ -100,7 +100,8 @@ wwt.count.df <- wwt.ws %>% freq() %>% as.data.frame() %>% na.omit()#data frame o
 wwt.ws.dem <- wwt.ws %>% projectRaster(dem.ws, bilinear) #Reproject the raster to the proveded DEM
 
 ww.ws <- wwt.ws.dem
-values(ww.ws)[values(ww.ws)<2] = NA
+
+ww.ws<-raster::mask(ww.ws,ww.ws<2,maskvalue=TRUE)
 
 
 ##Create sf lines: stream network, sn for watershed code ws.code
@@ -108,7 +109,7 @@ values(ww.ws)[values(ww.ws)<2] = NA
 ##warning: this takes 1-2 minutes depending on your choice of watershed
 bcdc_describe_feature("92344413-8035-4c08-b996-65a9b3f62fca")
 sn <- bcdc_query_geodata("92344413-8035-4c08-b996-65a9b3f62fca", crs = bcalb) %>%
-  filter( WATERSHED_GROUP_CODE == ws.code) %>%
+  filter(WATERSHED_GROUP_CODE == ws.code) %>%
   collect() %>% st_as_sf()
 
 #plot(sn["STREAM_ORDER"])
@@ -151,7 +152,7 @@ cb.r <- fasterize(cb, dem.ws, background = 0)
 rd.r <- rd %>% st_buffer(dist=(sum(res(dem.ws)/2))) %>% fasterize(dem.ws, background = 0)
 sn.r <- sn %>% st_buffer(dist=(sum(res(dem.ws)/2))) %>% fasterize(dem.ws, background = 0)
 
-#create a raster of connected wetland and stream rasters =1 rest null
+#create a raster of connected wetland and stream rasters = 1 rest null
 ww.sn.r <- sn.r + wwt.ws.dem
 values(ww.sn.r)[values(ww.sn.r) <= 1] = NA
 values(ww.sn.r)[values(ww.sn.r) > 1] = 1
