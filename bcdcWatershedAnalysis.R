@@ -6,6 +6,8 @@ library(raster)
 library(tidyverse)
 library(rgdal)
 library(rgrass7)
+library(stars)
+library(svMisc)
 
 ####Custom libraries####
 #Package for calculating upstream statistics (devtools::install_github("HunterGleason/GRASSBasinStats"))
@@ -46,7 +48,7 @@ if(as.logical(user_ws))
     ws<-st_transform(ws,bcalb_epsg)
   }
   
-#If use is using a BC watershed code 
+  #If use is using a BC watershed code 
 }else{
   #Prompt for code 
   ws_code<-readline("Please provide BC watershed code to use: ")
@@ -65,10 +67,10 @@ print("Obtaining digital elevation model, this may take a while...")
 dem_ws<-cded_get(ws)
 
 #Reproject if required 
-if(crs(dem_ws)@projargs!=bcalb_prj4)
-{
-  dem_ws<-raster::projectRaster(dem_ws,crs=bcalb_prj4)
-}
+# if(crs(dem_ws)@projargs!=bcalb_prj4)
+# {
+#   dem_ws<-raster::projectRaster(dem_ws,crs=bcalb_prj4)
+# }
 
 ####Load in wetland classification results, mask to watershed vector layer####
 #Prompt user for path to wetland classification raster (3-class) 
@@ -92,16 +94,30 @@ wwt_ws<-wwt %>%
   raster::mask(ws)
 
 
+wwt_ws[wwt_ws==1] <- NA
+
+wwt_ws_clump <- raster::clump(wwt_ws,directions=8)
+
+wwt_ws_v <- raster::rasterToPolygons(wwt_ws_clump,n=8,na.rm=T,dissolve = T)
+
+wwt_ws_v <- wwt_ws_v %>% sf::st_as_sf()
+
+wwt_ws_v <- wwt_ws_v %>% 
+  dplyr::mutate(Area = sf::st_area(.)) %>%
+  dplyr::filter(as.numeric(Area)>=5000) %>%
+  dplyr::rename(UID=clumps)
+
+
 ####Convert wwt_ws to a data frame with x-y coords, filter out upland pixels####
 
-xyz <- as.data.frame(rasterToPoints(wwt_ws))
-
-colnames(xyz)<-c("x","y","Value")
-
-wwt_df<-xyz %>%
-  dplyr::mutate(UID=row_number()) %>%
-  dplyr::mutate(out_name = paste('basin_',UID,sep="")) %>%
-  dplyr::filter(Value==2 | Value==3)
+# xyz <- as.data.frame(rasterToPoints(wwt_ws))
+# 
+# colnames(xyz)<-c("x","y","Value")
+# 
+# wwt_df<-xyz %>%
+#   dplyr::mutate(UID=row_number()) %>%
+#   dplyr::mutate(out_name = paste('basin_',UID,sep="")) %>%
+#   dplyr::filter(Value==2 | Value==3)
 
 ####Get disturbance / land use layers####
 
@@ -133,6 +149,7 @@ colnames(lyr_tabl)<-c('code','geom_ext','filter_exp')
 #DL layers using GetBCDataBatch
 dist_lst<-GetBCDataBatch::get_bcdata_batch(lyr_tabl)
 
+
 ####Rasterize disturbance layers for calculating basing statistics####
 sn<-fasterize::fasterize(dist_lst[[1]] %>% sf::st_buffer(dist=(sum(res(dem_ws)/2))), dem_ws, background = 0) %>% raster::crop(ws)
 cb.young<-fasterize::fasterize(dist_lst[[2]],dem_ws, background = 0) %>% raster::crop(ws)
@@ -156,12 +173,13 @@ initGRASS(gisBase = "/usr/lib/grass78",
 use_sp()
 #write dem_ws to GRASS env. 
 writeRAST(as(dem_ws,"SpatialGridDataFrame"),'dem',ignore.stderr = T,overwrite = T)
-#Set grass region parameters to DEM layer 
-execGRASS('g.region',parameters = list(raster='dem'))
-
 
 #Write DEM, wetland classification and FWA stream raster to GRASS environment
 writeRAST(as(wwt_ws,"SpatialGridDataFrame"),'wwt',ignore.stderr = T, overwrite = T)
+
+#Set grass region parameters to 'wwt' layer 
+execGRASS('g.region',parameters = list(raster='wwt'))
+
 writeRAST(as(sn,"SpatialGridDataFrame"),'fwa_stream_rast',ignore.stderr = T, overwrite = T)
 
 #Write binary disturbance raters to GRASS environment 
@@ -174,18 +192,61 @@ writeRAST(as(fr.adult,"SpatialGridDataFrame"),'fr_adult',ignore.stderr = T,overw
 writeRAST(as(fr.mature,"SpatialGridDataFrame"),'fr_mature',ignore.stderr = T,overwrite = T)
 
 ####Run r.watershed in GRASS to create DEM derivatives and stream network####
-execGRASS("r.watershed",parameters = list(elevation='dem',threshold=10,accumulation='acc',tci='topo_idx',spi='strm_pow',drainage='dir',stream='stream_r',length_slope='slop_lngth',slope_steepness='steep'),flags = c('overwrite','quiet'))
+execGRASS("r.watershed",parameters = list(elevation='dem',threshold=10,accumulation='acc',tci='topo_idx',spi='strm_pow',drainage='dir',stream='stream_r',length_slope='slop_lngth',slope_steepness='steep'),flags = c('overwrite','quiet','a'))
 
-####Example of summarizing basin statistics for sample (n=1000) of wetland pixels for the binary cutblock(adult) layer, use 26 threads####
+acc_r<-readRAST('acc',ignore.stderr = T)
+acc_r<-stars::st_as_stars(acc_r)
+st_crs(acc_r)<-bcalb_prj4
 
-#sample wwt_df pixels (n=1000)
-wwt_df_samp<-wwt_df[sample(c(1:nrow(wwt_df)),1000),]
+
+
+wetlnd_pour_pnt<-function(wetland)
+{
+  
+  acc_filt<-as.data.frame(acc_r[wetland])
+  
+  acc_max<-acc_filt[which.max(acc_filt$acc),]
+  
+  acc_x<-acc_max$x
+  
+  acc_y<-acc_max$y
+  
+  return(c(acc_x,acc_y))
+  
+}
+
+pour_pnts<-c()
+
+for(feat in c(1:nrow(wwt_ws_v)))
+{
+  progress(feat, max.value = nrow(wwt_ws_v),progress.bar = TRUE)
+  
+  UID<-wwt_ws_v[feat,]$UID
+  
+  x_y<-wetlnd_pour_pnt(wwt_ws_v[feat,])
+  
+  if(feat==1)
+  {
+    pour_pnts<-c(x_y[1],x_y[2],UID)
+  }else{
+    pour_pnts<-rbind(pour_pnts,c(x_y[1],x_y[2],UID))
+  }
+  
+}
+
+pour_pnts<-as.data.frame(pour_pnts)
+colnames(pour_pnts)<-c('x','y','UID')
+
+####Example of summarizing basin statistics for wetland pour points for the binary cutblock(adult) layer, use 26 threads####
 
 #Example of GRASSBasinStats use for binary cutblock(adult) layer 
-test<-GRASSBasinStats::get_basin_stats(basin_df=wwt_df_samp,procs=26,stat_rast='cb_adult')
+test<-GRASSBasinStats::get_basin_stats(basin_df=pour_pnts,procs=26,stat_rast='cb_adult')
 
+test$pa_cb_adult<-test$SUM/test$N
 
+wwt_ws_v<-wwt_ws_v %>% left_join(test,by='UID')
 
+mapview::mapview(wwt_ws_v,zcol='pa_cb_adult')
 
 
 ####!!!!Where from here, convert pixels to polygons, clumping ????!!!!####
@@ -206,7 +267,7 @@ ww.clump.poly <- rasterToPolygons(v1.clumps,dissolve = TRUE)
 ####make polygons of queens case clumped  wetland/water predictions
 ## upland set to NULL (NA) wetlands are 2 and water is 3
 ##add a field for the area of each polygon (will be in ha??)
-ww.ws.poly <- ww.ws %>% clump(direction = 8) %>% rasterToPolygons(dissolve = TRUE) %>% 
+ww.ws.poly <- wwt_ws %>% clump(direction = 8) %>% rasterToPolygons(dissolve = TRUE) %>% 
   smoothr::smooth(method = "ksmooth", smoothness = 2) %>% st_as_sf()
 ww.ws.poly$area<- st_area(ww.ws.poly)
 
