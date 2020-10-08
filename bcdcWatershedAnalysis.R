@@ -1,176 +1,255 @@
-##bcdc Wetland Analysis script
-##author : Deepa Filatow
-##initiated: March 12, 2020
-##last edited: May 20, 2020
-
-##option to clear memeory
-#rm(list = ls()) ## uncomment this line if you want to start fresh. WARNING..this will clear all libraries data, variables etc.
-
-############################################################################
-##Load libraries############################################################
-############################################################################
-
-library(bcdata)##https://github.com/bcgov/bcdata
+####Required libraries####
+library(bcdata)
 library(sf)
-library(tidyverse)
-library(mapview)
+library(sp)
 library(raster)
-library(fasterize)
-library(rdgal)
-library(igraph) #was required by raster::clump with directions=8. got an error and had to install
-library(rgeos) #got an error trying to crop and rasterToPolygon
-#install.packages("devtools")
-#devtools::install_github("mstrimas/smoothr") ##tried to load from CRAN without success
-library(smoothr)
+library(tidyverse)
+library(rgdal)
+library(rgrass7)
+library(stars)
+library(svMisc)
+
+####Custom libraries####
+#Package for calculating upstream statistics (devtools::install_github("HunterGleason/GRASSBasinStats"))
+library(GRASSBasinStats)
+#Package for obtaining bcdata layers in batch (devtools::install_github("HunterGleason/GetBCDataBatch"))
+library(GetBCDataBatch)
+#Package for obtaining CDED DEM, may be incorporated into bcdata package devtools::install_github(????))
+library(GrabCDED)
+
+####Define Global Vars####
+#BC Albs
+bcalb_epsg <- 3005
+bcalb_prj4<-'+proj=aea +lat_0=45 +lon_0=-126 +lat_1=50 +lat_2=58.5 +x_0=1000000 +y_0=0 +datum=NAD83 +units=m +no_defs'
 
 
-############################################################################
-### ADD TEST VARIABLES #####################################################
-############################################################################
+####Load in user specified watershed vector layer, or use BC watershed code####
+user_ws<-readline("Is a watershed vector layer being provided? Enter T of F. If F, a BC watershed code will be promted for.: ")
 
-bcalb <- 3005
-wwt.file <- system.file("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img") #water(3), wetland(2), terrestrial prediction surface(1)
-ws.code <- "PARS"## test watershed with plenty of data
-#dem.file <- "BC_DEM25m/bc_elevation_25m_bcalb.tif"
-dem <- raster("C:/Users/dfilatow/Documents/GISdownloads/HABC/elev.tif")#loadem
-
-mapsheet <- "093J070"##this is a mapsheet in our test watershed
-
-##get the mapsheet from bcdc
-ms <- bcdc_query_geodata("a61976ac-d8e8-4862-851e-d105227b6525", crs = bcalb) %>%
-  filter( MAP_TILE == mapsheet) %>%
-  collect()
-## this is the output from the 2020 FWCP-Peace wetland model
-wwt <- raster("C:/Users/dfilatow/Documents/FWPC_Williston/20190926-103025_map_reclass.img")
-
-BUFF <-  100
-
-############################################################################
-### Watershed Group ########################################################
-############################################################################
+#Prompt for grass data base path 
+grass_Db<-readline("Please provide path of GRASS GIS gisDbase, e.g., '/home/hunter/grassdata': ")
+#Promt user for name of the grass location
+grass_loc<-readline("Please provide desired name of GRASS GIS Location, e.g.,Wetland_PARS: ")
 
 
-##Create sf polygon: watershed group, ws from bcdc watershed code = ws.code
-##https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-watershed-groups
-bcdc_describe_feature("51f20b1a-ab75-42de-809d-bf415a0f9c62")
-ws <- bcdc_query_geodata("51f20b1a-ab75-42de-809d-bf415a0f9c62", crs = bcalb) %>%
-  filter( WATERSHED_GROUP_CODE == ws.code) %>%
-  collect() %>% st_as_sf()
-##TO DO:Test if conversion to sf is necessary for rasterization below now that raster:: is used
-
-ws.area_m2 <- sum(ws$AREA_HA)*10000 # watershed area for in hectrars later calculations. have to use sum in case of mulipolygons on the coast
-
-#plot(st_geometry(ws))
-
-##Create sf polygon: 20K mapsheet grids that intersect with the target watershed group
-##https://catalogue.data.gov.bc.ca/dataset/bcgs-1-20-000-grid
-ms.ws <- bcdc_query_geodata("a61976ac-d8e8-4862-851e-d105227b6525", crs = bcalb) %>%
-  filter( INTERSECTS(ws)) %>%
-  collect()
-
-#plot(st_geometry(ms.ws))
-
-
-#crop dem.habc to the watershed ws
-dem.ws <- dem %>% raster::crop(ws) %>% raster::mask(ws)
-#NOTE:crop then mask is more efficient and applies the correct extent
-#then directly masking from all of bc
-
-
-############################################################################
-### water and wetland values################################################
-############################################################################
+print("Reading in watershed layer...")
+#If user has basin shapefile to use 
+if(as.logical(user_ws))
+{
+  #Get path to basin shapefile
+  ws_pth<-readline("Please provide path to watershed vector layer to use: ")
+  
+  #Read basin as sf 
+  ws<-st_as_sf(sf::st_read(ws_pth))
+  
+  #Reproject if required
+  if(sf::st_crs(ws)$epsg!=bcalb_epsg)
+  {
+    ws<-st_transform(ws,bcalb_epsg)
+  }
+  
+  #If use is using a BC watershed code 
+}else{
+  #Prompt for code 
+  ws_code<-readline("Please provide BC watershed code to use: ")
+  
+  #Use bcdata package to download basin as sf 
+  ws <- bcdc_query_geodata("51f20b1a-ab75-42de-809d-bf415a0f9c62", crs = bcalb_epsg) %>%
+    filter(WATERSHED_GROUP_CODE == ws_code) %>%
+    collect() %>% st_as_sf()
+}
 
 
-## crop and mask upland wetland water wwt raster (1 2 3 ) for the watershed (ws) and the mapsheet (ms)
+####Get BC CDED tiles intersecting watershed, creat DEM####
+print("Obtaining digital elevation model, this may take a while...")
 
-wwt.ws <- wwt %>% raster::crop(ws) %>% raster::mask(ws)#wetland prediction clipped to watershed
+#Uses CDED package to get DEM intersecting the study basin 
+dem_ws<-cded_get(ws)
 
-wwt.count.df <- wwt.ws %>% freq() %>% as.data.frame() %>% na.omit()#data frame of non NA wetland catagory counts
+#Reproject if required 
+# if(crs(dem_ws)@projargs!=bcalb_prj4)
+# {
+#   dem_ws<-raster::projectRaster(dem_ws,crs=bcalb_prj4)
+# }
 
-wwt.ws.dem <- wwt.ws %>% projectRaster(dem.ws, bilinear) #Reproject the raster to the proveded DEM
+####Load in wetland classification results, mask to watershed vector layer####
+#Prompt user for path to wetland classification raster (3-class) 
+wwt_pth<-readline("Please provide path to wetland model classification raster, extent assumed to contain watershed AOI: ")
 
-ww.ws <- wwt.ws.dem
-values (ww.ws)[values(ww.ws)<2] = NA
+#Read classification using raster package 
+wwt<-raster(wwt_pth)
+
+#Reproject if required. 
+if(crs(wwt)@projargs!=bcalb_prj4)
+{
+  wwt<-raster::projectRaster(wwt,crs=bcalb_prj4)
+}
+
+#Resample DEM to wetland classification resolution
+dem_ws<-raster::resample(dem_ws,wwt)
+
+#Crop and mask wetland classification to watershed
+wwt_ws<-wwt %>%
+  raster::crop(ws) %>%
+  raster::mask(ws)
 
 
-##Create sf lines: stream network, sn for watershed code ws.code
-#https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network
-##warning: this takes 1-2 minutes depending on your choice of watershed
+wwt_ws[wwt_ws==1] <- NA
+
+wwt_ws_clump <- raster::clump(wwt_ws,directions=8)
+
+wwt_ws_v <- raster::rasterToPolygons(wwt_ws_clump,n=8,na.rm=T,dissolve = T)
+
+wwt_ws_v <- wwt_ws_v %>% sf::st_as_sf()
+
+wwt_ws_v <- wwt_ws_v %>% 
+  dplyr::mutate(Area = sf::st_area(.)) %>%
+  dplyr::filter(as.numeric(Area)>=5000) %>%
+  dplyr::rename(UID=clumps)
+
+
+####Convert wwt_ws to a data frame with x-y coords, filter out upland pixels####
+
+# xyz <- as.data.frame(rasterToPoints(wwt_ws))
+# 
+# colnames(xyz)<-c("x","y","Value")
+# 
+# wwt_df<-xyz %>%
+#   dplyr::mutate(UID=row_number()) %>%
+#   dplyr::mutate(out_name = paste('basin_',UID,sep="")) %>%
+#   dplyr::filter(Value==2 | Value==3)
+
+####Get disturbance / land use layers####
+
+#Streams
 bcdc_describe_feature("92344413-8035-4c08-b996-65a9b3f62fca")
-sn <- bcdc_query_geodata("92344413-8035-4c08-b996-65a9b3f62fca", crs = bcalb) %>%
-  filter( WATERSHED_GROUP_CODE == ws.code) %>%
-  collect() %>% st_as_sf()
 
-#plot(sn["STREAM_ORDER"])
-
-sn.length_m <- sum(sn$FEATURE_LENGTH_M)##length of streams in m in the watershed
-
-
-############################################################################
-### disturbance and land use layers#########################################
-############################################################################
-
-
-##Create sf polygon: cutblocks, cb from bcdc that intersects with ws
-##https://catalogue.data.gov.bc.ca/dataset/harvested-areas-of-bc-consolidated-cutblocks-
+#Describe current disturbance layers of interest
+#Cutblocks
 bcdc_describe_feature("b1b647a6-f271-42e0-9cd0-89ec24bce9f7")
-cb <- bcdc_query_geodata("b1b647a6-f271-42e0-9cd0-89ec24bce9f7", crs = bcalb) %>%
-   filter(INTERSECTS(ws)) %>%
-  collect() %>% st_as_sf()## Test if conversion to sf is necessary for rasterization below now that raster:: is used
-
-#plot(st_geometry(cb))
-
-cb.area_m2 <- sum(cb$FEATURE_AREA_SQM)
-
-##Create sf lines: roads, rd from bcdc that intersects with ws
-#https://catalogue.data.gov.bc.ca/dataset/digital-road-atlas-dra-master-partially-attributed-roads
-##warning: this takes 1-2 minutes depending on your choice of watershed
+#Roads
 bcdc_describe_feature("bb060417-b6e6-4548-b837-f9060d94743e")
-rd <- bcdc_query_geodata("bb060417-b6e6-4548-b837-f9060d94743e", crs = bcalb) %>%
-  filter(INTERSECTS(ws)) %>%
-  collect() %>% st_as_sf()
+#Fires
+bcdc_describe_feature("22c7cb44-1463-48f7-8e47-88857f207702")
 
-##what about planned roads
-##https://catalogue.data.gov.bc.ca/dataset/bcts-planned-roads
+#Define layer parameter vectors for input to GetBCDataBatch package 
+sn<-c("92344413-8035-4c08-b996-65a9b3f62fca",NA,"WATERSHED_GROUP_CODE == 'PARS'")
+cb.young<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR > 2010")
+cb.adult<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR <= 2010 && HARVEST_YEAR > 2000")
+cb.mature<-c("b1b647a6-f271-42e0-9cd0-89ec24bce9f7","ws","HARVEST_YEAR <= 2000")
+rd<-c("bb060417-b6e6-4548-b837-f9060d94743e","ws",NA)
+fr.young<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR > 2010")
+fr.adult<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR <= 2010 && FIRE_YEAR > 2000")
+fr.mature<-c("22c7cb44-1463-48f7-8e47-88857f207702","ws","FIRE_YEAR <= 2000")
 
-##Add in a part to summarize m of road
-rd.length_m <- sum(rd$FEATURE_LENGTH_M)
+#Create layer data frame and rename columns 
+lyr_tabl<-as.data.frame(rbind(sn,cb.young,cb.adult,cb.mature,rd,fr.young,fr.adult,fr.mature))
+colnames(lyr_tabl)<-c('code','geom_ext','filter_exp')
 
-#fasterize disturbance layers
-cb.r <- fasterize(cb, dem.ws, background = 0)
-rd.r <- rd %>% st_buffer(dist=(sum(res(dem)/2))) %>% fasterize(dem.ws, background = 0)
-sn.r <- sn %>% st_buffer(dist=(sum(res(dem)/2))) %>% fasterize(dem.ws, background = 0)
-
-#create a raster of connected wetland and stream rasters =1 rest null
-ww.sn.r <- sn.r + wwt.ws.dem
-values(ww.sn.r)[values(ww.sn.r) <= 1] = NA
-values(ww.sn.r)[values(ww.sn.r) > 1] = 1
-
-landuse.stack <- stack(cb.r, rd.r)#create a brick of land use rasters lu1
-hydrology.stack <- stack(ww.ws, sn.r, ww.sn.r)#create a brick of values v1. in this case wetlands, water and streams
-count.landuse <- sum(landuse.stack)# count of landuses 0 for none. Max of n for where all layers overlap
-count.hydrology <- sum(hydrology.stack)
-
-# create a hydrology values layer hv where all cells containing values are 1 and all cells withouth values are null
-hv <- count.hydrology
-values(hv)[values(hv) <= 1] = NA
-values(hv)[values(hv) >1 ] = 1
-hv.clumps <- raster::clump(hv, directions=8)
-
-##Add connected wetlands and streams v1.clumps to the hydrology raster stack
-hydrology.stack <- addLayer(hydrology.stack, hv.clumps)
-plot(v1)
-
-##try some stuff with v1.clumps
-
-hist(log(freq (hv.clumps))) # where i have used dem = habc elev this is the hystogram of area (ha) of connected wetland clumps
-
-hv.clump.elev <- zonal(z = hv.clumps, x = dem.ws, fun = 'sum', na.rm = TRUE)  
+#DL layers using GetBCDataBatch
+dist_lst<-GetBCDataBatch::get_bcdata_batch(lyr_tabl)
 
 
+####Rasterize disturbance layers for calculating basing statistics####
+sn<-fasterize::fasterize(dist_lst[[1]] %>% sf::st_buffer(dist=(sum(res(dem_ws)/2))), dem_ws, background = 0) %>% raster::crop(ws)
+cb.young<-fasterize::fasterize(dist_lst[[2]],dem_ws, background = 0) %>% raster::crop(ws)
+cb.adult<-fasterize::fasterize(dist_lst[[3]],dem_ws, background = 0) %>% raster::crop(ws)
+cb.mature<-fasterize::fasterize(dist_lst[[4]],dem_ws, background = 0) %>% raster::crop(ws)
+rd<-fasterize::fasterize(dist_lst[[5]] %>% sf::st_buffer(dist=(sum(res(dem_ws)/2))), dem_ws, background = 0) %>% raster::crop(ws)
+fr.young<-fasterize::fasterize(dist_lst[[6]],dem_ws, background = 0) %>% raster::crop(ws)
+fr.adult<-fasterize::fasterize(dist_lst[[7]],dem_ws, background = 0) %>% raster::crop(ws)
+fr.mature<-fasterize::fasterize(dist_lst[[8]],dem_ws, background = 0) %>% raster::crop(ws)
+
+####Set of GRASS Environment####
+initGRASS(gisBase = "/usr/lib/grass78",
+          home=tempdir(),
+          gisDbase =grass_Db,
+          location = grass_loc,
+          mapset = 'PERMANENT',
+          override = T,
+          remove_GISRC=T)
+
+#Set g.region to 'dem_ws' parameters 
+use_sp()
+#write dem_ws to GRASS env. 
+writeRAST(as(dem_ws,"SpatialGridDataFrame"),'dem',ignore.stderr = T,overwrite = T)
+
+#Write DEM, wetland classification and FWA stream raster to GRASS environment
+writeRAST(as(wwt_ws,"SpatialGridDataFrame"),'wwt',ignore.stderr = T, overwrite = T)
+
+#Set grass region parameters to 'wwt' layer 
+execGRASS('g.region',parameters = list(raster='wwt'))
+
+writeRAST(as(sn,"SpatialGridDataFrame"),'fwa_stream_rast',ignore.stderr = T, overwrite = T)
+
+#Write binary disturbance raters to GRASS environment 
+writeRAST(as(rd,"SpatialGridDataFrame"),'roads',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.young,"SpatialGridDataFrame"),'cb_young',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.adult,"SpatialGridDataFrame"),'cb_adult',ignore.stderr = T,overwrite = T)
+writeRAST(as(cb.mature,"SpatialGridDataFrame"),'cb_mature',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.young,"SpatialGridDataFrame"),'fr_young',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.adult,"SpatialGridDataFrame"),'fr_adult',ignore.stderr = T,overwrite = T)
+writeRAST(as(fr.mature,"SpatialGridDataFrame"),'fr_mature',ignore.stderr = T,overwrite = T)
+
+####Run r.watershed in GRASS to create DEM derivatives and stream network####
+execGRASS("r.watershed",parameters = list(elevation='dem',threshold=10,accumulation='acc',tci='topo_idx',spi='strm_pow',drainage='dir',stream='stream_r',length_slope='slop_lngth',slope_steepness='steep'),flags = c('overwrite','quiet','a'))
+
+acc_r<-readRAST('acc',ignore.stderr = T)
+acc_r<-stars::st_as_stars(acc_r)
+st_crs(acc_r)<-bcalb_prj4
 
 
+
+wetlnd_pour_pnt<-function(wetland)
+{
+  
+  acc_filt<-as.data.frame(acc_r[wetland])
+  
+  acc_max<-acc_filt[which.max(acc_filt$acc),]
+  
+  acc_x<-acc_max$x
+  
+  acc_y<-acc_max$y
+  
+  return(c(acc_x,acc_y))
+  
+}
+
+pour_pnts<-c()
+
+for(feat in c(1:nrow(wwt_ws_v)))
+{
+  progress(feat, max.value = nrow(wwt_ws_v),progress.bar = TRUE)
+  
+  UID<-wwt_ws_v[feat,]$UID
+  
+  x_y<-wetlnd_pour_pnt(wwt_ws_v[feat,])
+  
+  if(feat==1)
+  {
+    pour_pnts<-c(x_y[1],x_y[2],UID)
+  }else{
+    pour_pnts<-rbind(pour_pnts,c(x_y[1],x_y[2],UID))
+  }
+  
+}
+
+pour_pnts<-as.data.frame(pour_pnts)
+colnames(pour_pnts)<-c('x','y','UID')
+
+####Example of summarizing basin statistics for wetland pour points for the binary cutblock(adult) layer, use 26 threads####
+
+#Example of GRASSBasinStats use for binary cutblock(adult) layer 
+test<-GRASSBasinStats::get_basin_stats(basin_df=pour_pnts,procs=26,stat_rast='cb_adult')
+
+test$pa_cb_adult<-test$SUM/test$N
+
+wwt_ws_v<-wwt_ws_v %>% left_join(test,by='UID')
+
+mapview::mapview(wwt_ws_v,zcol='pa_cb_adult')
+
+
+####!!!!Where from here, convert pixels to polygons, clumping ????!!!!####
 ###############################END OF TESTED PART OF SCRIPT###########################################################
 ######################################################################################################################
 
@@ -188,7 +267,7 @@ ww.clump.poly <- rasterToPolygons(v1.clumps,dissolve = TRUE)
 ####make polygons of queens case clumped  wetland/water predictions
 ## upland set to NULL (NA) wetlands are 2 and water is 3
 ##add a field for the area of each polygon (will be in ha??)
-ww.ws.poly <- ww.ws %>% clump(direction = 8) %>% rasterToPolygons(dissolve = TRUE) %>% 
+ww.ws.poly <- wwt_ws %>% clump(direction = 8) %>% rasterToPolygons(dissolve = TRUE) %>% 
   smoothr::smooth(method = "ksmooth", smoothness = 2) %>% st_as_sf()
 ww.ws.poly$area<- st_area(ww.ws.poly)
 
@@ -267,5 +346,3 @@ aoi <- read_sf(aoi.file,stringsAsFactors = TRUE) %>%
 #plot(st_geometry(aoi))
 
 dem.aoi <- mask(dem.bc, aoi)
-
-
